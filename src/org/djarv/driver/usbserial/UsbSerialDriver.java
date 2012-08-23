@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.LinkedBlockingQueue;
 
 import android.content.Context;
 import android.hardware.usb.UsbConstants;
@@ -30,40 +31,69 @@ public class UsbSerialDriver {
 		KNOWN_DEVICES = Collections.unmodifiableMap(aMap);
 	}
 
-	private Context context;
-	private UsbManager usbManager;
-	private final IUsbConnectionHandler connectionHandler;
-	private ArrayList<UsbDevice> deviceList = new ArrayList<UsbDevice>();
-	private boolean stop = false;
+	private Context mContext;
+	private UsbManager mUsbManager;
+	private final IUsbConnectionHandler mConnectionHandler;
+	private ArrayList<UsbDevice> mDeviceList = new ArrayList<UsbDevice>();
+	private LinkedBlockingQueue<String> mOutgoingMessages = new LinkedBlockingQueue<String>();
+	private int mOutboundTimeout = 0;
+	private int mInboundTimeout = 0;
+
+	private boolean mStop = false;
+
+	private boolean mInboundLoop = false;
+	private boolean mOutboundLoop = false;
+
+	public boolean isInboundRunning() {
+		return mInboundLoop;
+	}
 	
+	public boolean isOutboundRunnint() {
+		return mOutboundLoop;
+	}
+	
+	public void queueMessage(String message) throws InterruptedException {
+		mOutgoingMessages.put(message);
+	}
 
 	public UsbSerialDriver(Context context, IUsbConnectionHandler connectionHandler) {
-		this.context = context;
-		this.connectionHandler = connectionHandler;
+		this.mContext = context;
+		this.mConnectionHandler = connectionHandler;
 		initialize();
 	}
 
 	private void initialize() {
-		usbManager = (UsbManager) context.getSystemService(Context.USB_SERVICE);
+		mUsbManager = (UsbManager) mContext.getSystemService(Context.USB_SERVICE);
 		refreshDeviceList();
 	}
 
+	/**
+	 * Attempt to connect to a USB device, will trigger onPermissionDenied(device) if we
+	 * do not have permission. After permissions have been granted from the calling activity,
+	 * retry connectToDevice(device, permissionRequired).  
+	 * @param device The device to connect
+	 * @param permissionRequired Interface to handle permission requests
+	 */
 	public void connectToDevice(UsbDevice device,
 			IPermissionRequiredListener permissionRequired) {
 
-		if (!usbManager.hasPermission(device))
+		if (!mUsbManager.hasPermission(device))
 			permissionRequired.onPermissionDenied(device);
 		else
 			connect(device);
 	}
 
+	/**
+	 * Refresh and get a full list of USB devices
+	 * @return A list of USB devices available
+	 */
 	public List<UsbDevice> getUsbDevices() {
 		refreshDeviceList();
-		return deviceList;
+		return mDeviceList;
 	}
 
 	public UsbDevice getCompatibleDevice() {
-		for (UsbDevice device : deviceList) {
+		for (UsbDevice device : mDeviceList) {
 			if (KNOWN_DEVICES.containsKey(formatDeviceId(device)))
 				return device;
 		}
@@ -72,11 +102,11 @@ public class UsbSerialDriver {
 	}
 
 	private void refreshDeviceList() {
-		Map<String, UsbDevice> devices = usbManager.getDeviceList();
+		Map<String, UsbDevice> devices = mUsbManager.getDeviceList();
 
-		deviceList.clear();
-		deviceList.addAll(devices.values());
-		Log.i(TAG, "Found " + deviceList.size() + " devices");
+		mDeviceList.clear();
+		mDeviceList.addAll(devices.values());
+		Log.i(TAG, "Found " + mDeviceList.size() + " devices");
 	}
 
 	public static String getPrettyDeviceName(UsbDevice device) {
@@ -94,95 +124,124 @@ public class UsbSerialDriver {
 				device.getProductId());
 	}
 
-	private void connect(UsbDevice device) {
-		UsbDeviceThread deviceThread = new UsbDeviceThread(device);
-		deviceThread.start();
+	private boolean connect(UsbDevice device) {
+		final UsbDeviceConnection connection = mUsbManager.openDevice(device);
+		
+		if (!connection.claimInterface(device.getInterface(1), true)) {
+			return false;
+		}
+
+		// TODO Describe command below. Activate serial interface?
+		connection.controlTransfer(0x21, 34, 0, 0, null, 0, 0);
+
+		// Set baud rate
+		setBaudRate(connection, 115200);
+
+		UsbEndpoint epIN = null;
+		UsbEndpoint epOUT = null;
+		
+		UsbInterface usbIf = device.getInterface(1);
+		for (int i = 0; i < usbIf.getEndpointCount(); i++) {
+			if (usbIf.getEndpoint(i).getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
+				if (usbIf.getEndpoint(i).getDirection() == UsbConstants.USB_DIR_IN)
+					epIN = usbIf.getEndpoint(i);
+				else
+					epOUT = usbIf.getEndpoint(i);
+			}
+		}
+
+		if(epIN != null) {
+			UsbDeviceInboundThread deviceInboundThread = new UsbDeviceInboundThread(connection, epIN);
+			deviceInboundThread.start();
+		}
+		
+		if(epOUT != null) {
+			UsbDeviceOutboundThread deviceOutboundThread = new UsbDeviceOutboundThread(connection, epOUT);
+			deviceOutboundThread.start();
+		}
+		
+		return true;
 	}
 
 	public void disconnect() {
 		// TODO Stub
 	}
 
-	private class UsbDeviceThread extends Thread {
-		private final UsbDevice device;
+	private static void setBaudRate(final UsbDeviceConnection connection, int baud) {
+	
+		byte[] msg = { (byte) (baud & 0xff),
+				(byte) ((baud >> 8) & 0xff),
+				(byte) ((baud >> 16) & 0xff),
+				(byte) ((baud >> 24) & 0xff),
+	
+				(byte) 0,   // stopBits
+				(byte) 0,   // parity
+				(byte) 8 }; // dataBits
+		
+		// TODO A lot of magic numbers here
+		connection.controlTransfer(0x21, FLAG_BAUD_RATE, 0, 0, msg, 7, 0);
+	}
 
-		public UsbDeviceThread(UsbDevice device) {
-			this.device = device;
+	private class UsbDeviceOutboundThread extends Thread {
+		private final UsbDeviceConnection mUsbDeviceConnection;
+		private final UsbEndpoint mEndpoint;
+		public UsbDeviceOutboundThread(UsbDeviceConnection usbDeviceConnection, UsbEndpoint endpoint) {
+			mUsbDeviceConnection = usbDeviceConnection;
+			mEndpoint = endpoint;			
+		}
+		
+		@Override
+		public void run() {
+			mOutboundLoop = true;
+			UsbRequest usbRequest = new UsbRequest();
+			usbRequest.initialize(mUsbDeviceConnection, mEndpoint);
+			
+			for (;;) {
+				try {
+					String message = mOutgoingMessages.take();
+					mUsbDeviceConnection.bulkTransfer(mEndpoint, message.getBytes(), message.getBytes().length, mOutboundTimeout);
+				} catch (InterruptedException e) {
+					break;
+				}
+			}
+			
+			mOutboundLoop = false;
+		}
+	}
+	
+	private class UsbDeviceInboundThread extends Thread {
+		private final UsbDeviceConnection mUsbDeviceConnection;
+		private final UsbEndpoint mEndpoint;
+		
+		public UsbDeviceInboundThread(UsbDeviceConnection usbDeviceConnection, UsbEndpoint endpoint) {
+			mUsbDeviceConnection = usbDeviceConnection;
+			mEndpoint = endpoint;
 		}
 
 		@Override
 		public void run() {
-			// Running
-			final UsbDeviceConnection conn = usbManager.openDevice(device);
-			if (!conn.claimInterface(device.getInterface(1), true)) {
-				return;
-			}
-
-			// Arduino Serial usb Conv
-			conn.controlTransfer(0x21, 34, 0, 0, null, 0, 0);
-
-			// Set baud rate
-			setBaudRate(conn, 115200);
-
-			UsbEndpoint epIN = null;
-			UsbEndpoint epOUT = null;
-
-			UsbInterface usbIf = device.getInterface(1);
-			for (int i = 0; i < usbIf.getEndpointCount(); i++) {
-				if (usbIf.getEndpoint(i).getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
-					if (usbIf.getEndpoint(i).getDirection() == UsbConstants.USB_DIR_IN)
-						epIN = usbIf.getEndpoint(i);
-					else
-						epOUT = usbIf.getEndpoint(i);
-				}
-			}
-
-			UsbRequest usbRequest = new UsbRequest();
-			usbRequest.initialize(conn, epIN);
-
-			// addMessage("Endpoint set up");
-
-			int length = 256;
+			mInboundLoop = true;
+			
+			// TODO set up buffer size in driver
+			int length = 1024;
 
 			byte[] buffer = new byte[length];
-			StringBuffer sb = new StringBuffer();
-
+			
 			// Start loop
 			for (;;) {
-				int responseSize = conn.bulkTransfer(epIN, buffer, length, 0);
+				int responseSize = mUsbDeviceConnection.bulkTransfer(mEndpoint, buffer, length, mInboundTimeout);
+				
 				if (responseSize > 0) {
-					// Example string: $S,562226333,155331283,0,0,0*
 					
-					// FIXME A lot of APHW specific stuff here, move this out of the driver
-					for(int i = 0; i < responseSize; i++) {
-						sb.append(String.format("%c", buffer[i]));
-					}
-					if(sb.toString().trim().endsWith("*")) {
-						// TODO fire message event -- addMessage(sb.toString().trim());
-						sb = new StringBuffer();
-					}
+					mConnectionHandler.onMessage(new String(buffer, 0, responseSize));
 				}
 
-				if (stop) {
-					connectionHandler.onConnectionStopped();
-					return;
+				if (mStop) {
+					mConnectionHandler.onConnectionStopped();
+					break;
 				}
 			}
-		}
-
-		private void setBaudRate(final UsbDeviceConnection connection, int baud) {
-
-			byte[] msg = { (byte) (baud & 0xff),
-					(byte) ((baud >> 8) & 0xff),
-					(byte) ((baud >> 16) & 0xff),
-					(byte) ((baud >> 24) & 0xff),
-
-					(byte) 0,   // stopBits
-					(byte) 0,   // parity
-					(byte) 8 }; // dataBits
-			
-			// TODO A lot of magic numbers here
-			connection.controlTransfer(0x21, FLAG_BAUD_RATE, 0, 0, msg, 7, 0);
+			mInboundLoop = false;
 		}
 	}
 }
