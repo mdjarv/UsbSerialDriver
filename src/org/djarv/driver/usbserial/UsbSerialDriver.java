@@ -7,7 +7,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingQueue;
 
+import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.hardware.usb.UsbConstants;
 import android.hardware.usb.UsbDevice;
 import android.hardware.usb.UsbDeviceConnection;
@@ -23,6 +27,7 @@ public class UsbSerialDriver {
 	private static final int FLAG_BAUD_RATE = 32;
 
 	public static final Map<String, String> KNOWN_DEVICES;
+	private static final String ACTION_USB_PERMISSION = "org.djarv.driver.usbserial.USB_PERMISSION";
 	static {
 		Map<String, String> aMap = new HashMap<String, String>();
 		aMap.put("2341:0010", "Arduino Mega 2560");
@@ -44,47 +49,91 @@ public class UsbSerialDriver {
 	private boolean mInboundLoop = false;
 	private boolean mOutboundLoop = false;
 
-	public boolean isInboundRunning() {
-		return mInboundLoop;
-	}
-	
-	public boolean isOutboundRunnint() {
-		return mOutboundLoop;
-	}
-	
 	public void queueMessage(String message) throws InterruptedException {
 		mOutgoingMessages.put(message);
 	}
 
-	public UsbSerialDriver(Context context, IUsbConnectionHandler connectionHandler) {
+	public UsbSerialDriver(Context context,
+			IUsbConnectionHandler connectionHandler) {
 		this.mContext = context;
 		this.mConnectionHandler = connectionHandler;
 		initialize();
 	}
 
 	private void initialize() {
-		mUsbManager = (UsbManager) mContext.getSystemService(Context.USB_SERVICE);
+		mUsbManager = (UsbManager) mContext
+				.getSystemService(Context.USB_SERVICE);
 		refreshDeviceList();
 	}
 
 	/**
-	 * Attempt to connect to a USB device, will trigger onPermissionDenied(device) if we
-	 * do not have permission. After permissions have been granted from the calling activity,
-	 * retry connectToDevice(device, permissionRequired).  
-	 * @param device The device to connect
-	 * @param permissionRequired Interface to handle permission requests
+	 * Attempt to connect to a USB device, will trigger
+	 * onPermissionDenied(device) if we do not have permission. After
+	 * permissions have been granted from the calling activity, retry
+	 * connectToDevice(device, permissionRequired).
+	 * 
+	 * @param device
+	 *            The device to connect
+	 * @param permissionRequired
+	 *            Interface to handle permission requests
 	 */
-	public void connectToDevice(UsbDevice device,
-			IPermissionRequiredListener permissionRequired) {
+	public void connectToDevice(UsbDevice device) {
 
-		if (!mUsbManager.hasPermission(device))
-			permissionRequired.onPermissionDenied(device);
-		else
+		if (!mUsbManager.hasPermission(device)) {
+			UsbManager usbman = (UsbManager) mContext
+					.getSystemService(Context.USB_SERVICE);
+			PendingIntent pi = PendingIntent.getBroadcast(mContext, 0,
+					new Intent(ACTION_USB_PERMISSION), 0);
+			mContext.registerReceiver(mPermissionReceiver, new IntentFilter(
+					ACTION_USB_PERMISSION));
+			usbman.requestPermission(device, pi);
+		} else
 			connect(device);
+	}
+
+	private BroadcastReceiver mPermissionReceiver = new PermissionReceiver(
+			new IPermissionListener() {
+				@Override
+				public void onPermissionDenied(UsbDevice d) {
+					Log.w(TAG, "Permission denied on " + d.getDeviceId());
+				}
+			});
+	private UsbDeviceOutboundThread mOutboundThread;
+	private UsbDeviceInboundThread mInboundThread;
+
+	private class PermissionReceiver extends BroadcastReceiver {
+		private final IPermissionListener mPermissionListener;
+
+		public PermissionReceiver(IPermissionListener permissionListener) {
+			mPermissionListener = permissionListener;
+		}
+
+		@Override
+		public void onReceive(Context context, Intent intent) {
+			mContext.unregisterReceiver(this);
+			if (intent.getAction().equals(ACTION_USB_PERMISSION)) {
+				if (!intent.getBooleanExtra(
+						UsbManager.EXTRA_PERMISSION_GRANTED, false)) {
+					mPermissionListener.onPermissionDenied((UsbDevice) intent
+							.getParcelableExtra(UsbManager.EXTRA_DEVICE));
+				} else {
+					Log.i(TAG, "Permission granted");
+					UsbDevice dev = (UsbDevice) intent
+							.getParcelableExtra(UsbManager.EXTRA_DEVICE);
+					if (dev != null) {
+						connect(dev);
+					} else {
+						Log.e(TAG, "Device not present!");
+					}
+				}
+			}
+		}
+
 	}
 
 	/**
 	 * Refresh and get a full list of USB devices
+	 * 
 	 * @return A list of USB devices available
 	 */
 	public List<UsbDevice> getUsbDevices() {
@@ -93,7 +142,7 @@ public class UsbSerialDriver {
 	}
 
 	public UsbDevice getCompatibleDevice() {
-		for (UsbDevice device : mDeviceList) {
+		for (UsbDevice device : getUsbDevices()) {
 			if (KNOWN_DEVICES.containsKey(formatDeviceId(device)))
 				return device;
 		}
@@ -125,8 +174,10 @@ public class UsbSerialDriver {
 	}
 
 	private boolean connect(UsbDevice device) {
+		mStop = false;
+
 		final UsbDeviceConnection connection = mUsbManager.openDevice(device);
-		
+
 		if (!connection.claimInterface(device.getInterface(1), true)) {
 			return false;
 		}
@@ -139,7 +190,7 @@ public class UsbSerialDriver {
 
 		UsbEndpoint epIN = null;
 		UsbEndpoint epOUT = null;
-		
+
 		UsbInterface usbIf = device.getInterface(1);
 		for (int i = 0; i < usbIf.getEndpointCount(); i++) {
 			if (usbIf.getEndpoint(i).getType() == UsbConstants.USB_ENDPOINT_XFER_BULK) {
@@ -150,34 +201,53 @@ public class UsbSerialDriver {
 			}
 		}
 
-		if(epIN != null) {
-			UsbDeviceInboundThread deviceInboundThread = new UsbDeviceInboundThread(connection, epIN);
-			deviceInboundThread.start();
+		if (epIN != null) {
+			mInboundThread = new UsbDeviceInboundThread(connection, epIN);
+			mInboundThread.start();
 		}
-		
-		if(epOUT != null) {
-			UsbDeviceOutboundThread deviceOutboundThread = new UsbDeviceOutboundThread(connection, epOUT);
-			deviceOutboundThread.start();
+
+		if (epOUT != null) {
+			mOutboundThread = new UsbDeviceOutboundThread(connection, epOUT);
+			mOutboundThread.start();
 		}
-		
+
 		return true;
 	}
 
 	public void disconnect() {
-		// TODO Stub
+		mStop = true;
+
+		if (mInboundLoop) {
+			mInboundThread.interrupt();
+			try {
+				mInboundThread.join();
+				mInboundThread = null;
+			} catch (InterruptedException e) {
+				Log.w(TAG, "Inbound thread shutdown interrupted", e);
+			}
+		}
+
+		if (mOutboundLoop) {
+			mOutboundThread.interrupt();
+			try {
+				mOutboundThread.join();
+				mOutboundThread = null;
+			} catch (InterruptedException e) {
+				Log.w(TAG, "Outbound thread shutdown interrupted", e);
+			}
+		}
 	}
 
-	private static void setBaudRate(final UsbDeviceConnection connection, int baud) {
-	
-		byte[] msg = { (byte) (baud & 0xff),
-				(byte) ((baud >> 8) & 0xff),
-				(byte) ((baud >> 16) & 0xff),
-				(byte) ((baud >> 24) & 0xff),
-	
-				(byte) 0,   // stopBits
-				(byte) 0,   // parity
+	private static void setBaudRate(final UsbDeviceConnection connection,
+			int baud) {
+
+		byte[] msg = { (byte) (baud & 0xff), (byte) ((baud >> 8) & 0xff),
+				(byte) ((baud >> 16) & 0xff), (byte) ((baud >> 24) & 0xff),
+
+				(byte) 0, // stopBits
+				(byte) 0, // parity
 				(byte) 8 }; // dataBits
-		
+
 		// TODO A lot of magic numbers here
 		connection.controlTransfer(0x21, FLAG_BAUD_RATE, 0, 0, msg, 7, 0);
 	}
@@ -185,35 +255,45 @@ public class UsbSerialDriver {
 	private class UsbDeviceOutboundThread extends Thread {
 		private final UsbDeviceConnection mUsbDeviceConnection;
 		private final UsbEndpoint mEndpoint;
-		public UsbDeviceOutboundThread(UsbDeviceConnection usbDeviceConnection, UsbEndpoint endpoint) {
+
+		public UsbDeviceOutboundThread(UsbDeviceConnection usbDeviceConnection,
+				UsbEndpoint endpoint) {
 			mUsbDeviceConnection = usbDeviceConnection;
-			mEndpoint = endpoint;			
+			mEndpoint = endpoint;
 		}
-		
+
 		@Override
 		public void run() {
 			mOutboundLoop = true;
 			UsbRequest usbRequest = new UsbRequest();
 			usbRequest.initialize(mUsbDeviceConnection, mEndpoint);
-			
+
 			for (;;) {
+				Log.d(TAG, "Outbound loop");
 				try {
 					String message = mOutgoingMessages.take();
-					mUsbDeviceConnection.bulkTransfer(mEndpoint, message.getBytes(), message.getBytes().length, mOutboundTimeout);
+					mUsbDeviceConnection.bulkTransfer(mEndpoint,
+							message.getBytes(), message.getBytes().length,
+							mOutboundTimeout);
 				} catch (InterruptedException e) {
+					mConnectionHandler
+							.onMessage("Outbound connection terminated");
 					break;
 				}
 			}
-			
+
+			Log.d(TAG, "Outbound loop ended");
+
 			mOutboundLoop = false;
 		}
 	}
-	
+
 	private class UsbDeviceInboundThread extends Thread {
 		private final UsbDeviceConnection mUsbDeviceConnection;
 		private final UsbEndpoint mEndpoint;
-		
-		public UsbDeviceInboundThread(UsbDeviceConnection usbDeviceConnection, UsbEndpoint endpoint) {
+
+		public UsbDeviceInboundThread(UsbDeviceConnection usbDeviceConnection,
+				UsbEndpoint endpoint) {
 			mUsbDeviceConnection = usbDeviceConnection;
 			mEndpoint = endpoint;
 		}
@@ -221,26 +301,36 @@ public class UsbSerialDriver {
 		@Override
 		public void run() {
 			mInboundLoop = true;
-			
+
 			// TODO set up buffer size in driver
 			int length = 1024;
 
 			byte[] buffer = new byte[length];
-			
+
 			// Start loop
 			for (;;) {
-				int responseSize = mUsbDeviceConnection.bulkTransfer(mEndpoint, buffer, length, mInboundTimeout);
-				
+				Log.d(TAG, "Inbound loop");
+				int responseSize = mUsbDeviceConnection.bulkTransfer(mEndpoint,
+						buffer, length, mInboundTimeout);
 				if (responseSize > 0) {
-					
-					mConnectionHandler.onMessage(new String(buffer, 0, responseSize));
+					mConnectionHandler.onMessage(new String(buffer, 0,
+							responseSize));
+				} else {
+					try {
+						// TODO wait a second for new data
+						sleep(1000);
+					} catch (InterruptedException e) {
+						mStop = true;
+					}
 				}
-
 				if (mStop) {
-					mConnectionHandler.onConnectionStopped();
+					mConnectionHandler
+							.onMessage("Inbound connection terminated");
 					break;
 				}
 			}
+
+			Log.d(TAG, "Inbound loop ended");
 			mInboundLoop = false;
 		}
 	}

@@ -2,6 +2,6 @@ package org.djarv.driver.usbserial;
 
 import android.hardware.usb.UsbDevice;
 
-public interface IPermissionRequiredListener {
+public interface IPermissionListener {
 	void onPermissionDenied(UsbDevice device);
 }
