@@ -73,7 +73,7 @@ public class UsbSerialDriver {
 
 			// Start loop
 			for (;;) {
-				Log.d(TAG, "Inbound loop");
+				// Log.d(TAG, "Inbound loop");
 				int responseSize = mUsbDeviceConnection.bulkTransfer(mEndpoint,
 						buffer, length, mInboundTimeout);
 				if (responseSize > 0) {
@@ -81,7 +81,7 @@ public class UsbSerialDriver {
 							responseSize));
 				} else {
 					try {
-						// TODO wait a second for new data
+						// Wait a second for new data
 						sleep(1000);
 					} catch (InterruptedException e) {
 						mStop = true;
@@ -119,9 +119,12 @@ public class UsbSerialDriver {
 				Log.d(TAG, "Outbound loop");
 				try {
 					String message = mOutgoingMessages.take();
-					mUsbDeviceConnection.bulkTransfer(mEndpoint,
+					Log.d(TAG, "Sending message: "+message);
+					
+					int result = mUsbDeviceConnection.bulkTransfer(mEndpoint,
 							message.getBytes(), message.getBytes().length,
 							mOutboundTimeout);
+					Log.d(TAG, "Sent "+result+" bytes");
 				} catch (InterruptedException e) {
 					mConnectionHandler
 							.onMessage("Outbound connection terminated");
@@ -214,12 +217,18 @@ public class UsbSerialDriver {
 	 * permissions have been granted from the calling activity, retry
 	 * connectToDevice(device, permissionRequired).
 	 * 
+	 * If a connection already exists, it will disconnect and stop threads first.
+	 * 
 	 * @param device
 	 *            The device to connect
 	 * @param permissionRequired
 	 *            Interface to handle permission requests
 	 */
 	public void connect(UsbDevice device) {
+		if(mInboundLoop || mOutboundLoop)
+			disconnect();
+		
+		mStop = false;
 
 		if (!mUsbManager.hasPermission(device)) {
 			UsbManager usbman = (UsbManager) mContext
@@ -324,8 +333,13 @@ public class UsbSerialDriver {
 		refreshDeviceList();
 	}
 
-	public void queueMessage(String message) throws InterruptedException {
-		mOutgoingMessages.put(message);
+	public void queueMessage(String message) {
+		try {
+			mOutgoingMessages.put(message);
+			// Log.d(TAG, "Message queued: "+message);
+		} catch (InterruptedException e) {
+			Log.w(TAG, "Message not queued, thread was interrupted");
+		}
 	}
 
 	private void refreshDeviceList() {
