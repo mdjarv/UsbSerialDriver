@@ -52,6 +52,7 @@ public class UsbSerialDriver {
 		}
 
 	}
+
 	private class UsbDeviceInboundThread extends Thread {
 		private final UsbDeviceConnection mUsbDeviceConnection;
 		private final UsbEndpoint mEndpoint;
@@ -88,8 +89,7 @@ public class UsbSerialDriver {
 					}
 				}
 				if (mStop) {
-					mConnectionHandler
-							.onMessage("Inbound connection terminated");
+					//mConnectionHandler.onMessage("Inbound connection terminated");
 					break;
 				}
 			}
@@ -119,15 +119,14 @@ public class UsbSerialDriver {
 				Log.d(TAG, "Outbound loop");
 				try {
 					String message = mOutgoingMessages.take();
-					Log.d(TAG, "Sending message: "+message);
-					
+					Log.d(TAG, "Sending message: " + message);
+
 					int result = mUsbDeviceConnection.bulkTransfer(mEndpoint,
 							message.getBytes(), message.getBytes().length,
 							mOutboundTimeout);
-					Log.d(TAG, "Sent "+result+" bytes");
+					Log.d(TAG, "Sent " + result + " bytes");
 				} catch (InterruptedException e) {
-					mConnectionHandler
-							.onMessage("Outbound connection terminated");
+					//mConnectionHandler.onMessage("Outbound connection terminated");
 					break;
 				}
 			}
@@ -137,6 +136,7 @@ public class UsbSerialDriver {
 			mOutboundLoop = false;
 		}
 	}
+
 	private static final String TAG = UsbSerialDriver.class.getSimpleName();
 	private static final int FLAG_BAUD_RATE = 32;
 
@@ -149,10 +149,12 @@ public class UsbSerialDriver {
 		aMap.put("1EAF:0004", "LeafLabs Maple (r5)");
 		KNOWN_DEVICES = Collections.unmodifiableMap(aMap);
 	}
+
 	private static String formatDeviceId(UsbDevice device) {
 		return String.format("%04X:%04X", device.getVendorId(),
 				device.getProductId());
 	}
+
 	public static String getPrettyDeviceName(UsbDevice device) {
 		String deviceId = formatDeviceId(device);
 		String name = KNOWN_DEVICES.get(deviceId);
@@ -162,6 +164,7 @@ public class UsbSerialDriver {
 
 		return String.format("%s (%s)", name, deviceId);
 	}
+
 	private static void setBaudRate(final UsbDeviceConnection connection,
 			int baud) {
 
@@ -175,6 +178,7 @@ public class UsbSerialDriver {
 		// TODO A lot of magic numbers here
 		connection.controlTransfer(0x21, FLAG_BAUD_RATE, 0, 0, msg, 7, 0);
 	}
+
 	private Context mContext;
 
 	private UsbManager mUsbManager;
@@ -217,7 +221,8 @@ public class UsbSerialDriver {
 	 * permissions have been granted from the calling activity, retry
 	 * connectToDevice(device, permissionRequired).
 	 * 
-	 * If a connection already exists, it will disconnect and stop threads first.
+	 * If a connection already exists, it will disconnect and stop threads
+	 * first.
 	 * 
 	 * @param device
 	 *            The device to connect
@@ -225,9 +230,9 @@ public class UsbSerialDriver {
 	 *            Interface to handle permission requests
 	 */
 	public void connect(UsbDevice device) {
-		if(mInboundLoop || mOutboundLoop)
+		if (mInboundLoop || mOutboundLoop)
 			disconnect();
-		
+
 		mStop = false;
 
 		if (!mUsbManager.hasPermission(device)) {
@@ -244,8 +249,10 @@ public class UsbSerialDriver {
 
 	public void disconnect() {
 		mStop = true;
+		boolean connectionWasActive = false;
 
 		if (mInboundLoop) {
+			connectionWasActive = true;
 			mInboundThread.interrupt();
 			try {
 				mInboundThread.join();
@@ -256,6 +263,7 @@ public class UsbSerialDriver {
 		}
 
 		if (mOutboundLoop) {
+			connectionWasActive = true;
 			mOutboundThread.interrupt();
 			try {
 				mOutboundThread.join();
@@ -264,6 +272,9 @@ public class UsbSerialDriver {
 				Log.w(TAG, "Outbound thread shutdown interrupted", e);
 			}
 		}
+
+		if (connectionWasActive)
+			mConnectionHandler.onDisconnected();
 	}
 
 	private boolean doConnect(UsbDevice device) {
@@ -303,7 +314,7 @@ public class UsbSerialDriver {
 			mOutboundThread = new UsbDeviceOutboundThread(connection, epOUT);
 			mOutboundThread.start();
 		}
-		
+
 		mConnectionHandler.onConnected();
 		return true;
 	}
