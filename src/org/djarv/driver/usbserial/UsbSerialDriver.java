@@ -22,7 +22,6 @@ import android.hardware.usb.UsbRequest;
 import android.util.Log;
 
 public class UsbSerialDriver {
-
 	private class PermissionReceiver extends BroadcastReceiver {
 		private final IPermissionListener mPermissionListener;
 
@@ -78,8 +77,9 @@ public class UsbSerialDriver {
 				int responseSize = mUsbDeviceConnection.bulkTransfer(mEndpoint,
 						buffer, length, mInboundTimeout);
 				if (responseSize > 0) {
-					mConnectionHandler.onMessage(new String(buffer, 0,
-							responseSize));
+					if (mConnectionHandler != null)
+						mConnectionHandler.onMessage(new String(buffer, 0,
+								responseSize));
 				} else {
 					try {
 						// Wait a second for new data
@@ -89,7 +89,7 @@ public class UsbSerialDriver {
 					}
 				}
 				if (mStop) {
-					//mConnectionHandler.onMessage("Inbound connection terminated");
+					// mConnectionHandler.onMessage("Inbound connection terminated");
 					break;
 				}
 			}
@@ -126,7 +126,7 @@ public class UsbSerialDriver {
 							mOutboundTimeout);
 					Log.d(TAG, "Sent " + result + " bytes");
 				} catch (InterruptedException e) {
-					//mConnectionHandler.onMessage("Outbound connection terminated");
+					// mConnectionHandler.onMessage("Outbound connection terminated");
 					break;
 				}
 			}
@@ -138,9 +138,10 @@ public class UsbSerialDriver {
 	}
 
 	private static final String TAG = UsbSerialDriver.class.getSimpleName();
-	private static final int FLAG_BAUD_RATE = 32;
 
+	private static final int FLAG_BAUD_RATE = 32;
 	public static final Map<String, String> KNOWN_DEVICES;
+
 	private static final String ACTION_USB_PERMISSION = "org.djarv.driver.usbserial.USB_PERMISSION";
 	static {
 		Map<String, String> aMap = new HashMap<String, String>();
@@ -149,7 +150,6 @@ public class UsbSerialDriver {
 		aMap.put("1EAF:0004", "LeafLabs Maple (r5)");
 		KNOWN_DEVICES = Collections.unmodifiableMap(aMap);
 	}
-
 	private static String formatDeviceId(UsbDevice device) {
 		return String.format("%04X:%04X", device.getVendorId(),
 				device.getProductId());
@@ -183,9 +183,9 @@ public class UsbSerialDriver {
 
 	private UsbManager mUsbManager;
 
-	private final IUsbConnectionHandler mConnectionHandler;
-	private ArrayList<UsbDevice> mDeviceList = new ArrayList<UsbDevice>();
+	private IUsbConnectionHandler mConnectionHandler;
 
+	private ArrayList<UsbDevice> mDeviceList = new ArrayList<UsbDevice>();
 	private LinkedBlockingQueue<String> mOutgoingMessages = new LinkedBlockingQueue<String>();
 
 	private int mOutboundTimeout = 0;
@@ -195,6 +195,7 @@ public class UsbSerialDriver {
 	private boolean mStop = false;
 
 	private boolean mInboundLoop = false;
+
 	private boolean mOutboundLoop = false;
 	private BroadcastReceiver mPermissionReceiver = new PermissionReceiver(
 			new IPermissionListener() {
@@ -203,7 +204,6 @@ public class UsbSerialDriver {
 					Log.w(TAG, "Permission denied on " + d.getDeviceId());
 				}
 			});
-
 	private UsbDeviceOutboundThread mOutboundThread;
 
 	private UsbDeviceInboundThread mInboundThread;
@@ -273,7 +273,7 @@ public class UsbSerialDriver {
 			}
 		}
 
-		if (connectionWasActive)
+		if (connectionWasActive && mConnectionHandler != null)
 			mConnectionHandler.onDisconnected();
 	}
 
@@ -315,7 +315,8 @@ public class UsbSerialDriver {
 			mOutboundThread.start();
 		}
 
-		mConnectionHandler.onConnected();
+		if(mConnectionHandler != null)
+			mConnectionHandler.onConnected();
 		return true;
 	}
 
@@ -359,5 +360,9 @@ public class UsbSerialDriver {
 		mDeviceList.clear();
 		mDeviceList.addAll(devices.values());
 		Log.i(TAG, "Found " + mDeviceList.size() + " devices");
+	}
+
+	public void setUsbConnectionHandler(IUsbConnectionHandler connectionHandler) {
+		mConnectionHandler = connectionHandler;
 	}
 }
