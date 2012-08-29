@@ -78,7 +78,7 @@ public class UsbSerialDriver {
 						buffer, length, mInboundTimeout);
 				if (responseSize > 0) {
 					if (mConnectionHandler != null)
-						mConnectionHandler.onMessage(new String(buffer, 0,
+						mConnectionHandler.onUsbDeviceMessage(new String(buffer, 0,
 								responseSize));
 				} else {
 					try {
@@ -274,7 +274,7 @@ public class UsbSerialDriver {
 		}
 
 		if (connectionWasActive && mConnectionHandler != null)
-			mConnectionHandler.onDisconnected();
+			mConnectionHandler.onUsbDeviceDisconnected();
 	}
 
 	private boolean doConnect(UsbDevice device) {
@@ -316,7 +316,7 @@ public class UsbSerialDriver {
 		}
 
 		if(mConnectionHandler != null)
-			mConnectionHandler.onConnected();
+			mConnectionHandler.onUsbDeviceConnected();
 		return true;
 	}
 
