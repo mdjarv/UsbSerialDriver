@@ -230,6 +230,9 @@ public class UsbSerialDriver {
 	 *            Interface to handle permission requests
 	 */
 	public void connect(UsbDevice device) {
+		if(device == null)
+			return;
+		
 		if (mInboundLoop || mOutboundLoop)
 			disconnect();
 
